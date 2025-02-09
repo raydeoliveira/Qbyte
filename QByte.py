@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('TkAgg')  # Set the backend before other matplotlib imports
+
 from mpl_toolkits.mplot3d import Axes3D  # required import for some machines to render 3d projection
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,7 +23,13 @@ from astral import LocationInfo
 import datetime
 from astral.sun import sunrise,sunset
 from urllib.request import urlopen as uReq
+
+os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Silence Tk deprecation warnings on macOS
 warnings.simplefilter('ignore')
+
+# Configure matplotlib for macOS
+plt.style.use('dark_background')
+plt.rcParams['toolbar'] = 'None'  # Hide toolbar for cleaner look
 
 ###########CONFIGURE HERE###########
 
@@ -32,9 +41,9 @@ wordsize = 36
 Default_Marker = 'o'  # for a full list: https://matplotlib.org/stable/api/markers_api.html
 
 NEDspeed = 250  # Number of bytes to stream from the RNG each second
-RandomSrc = 'prng'  # 'trng' = TrueRNG hardware (https://ubld.it/truerng_v3) ... 'prng' = pseudo RNG ... 'ipfs' = interplenetary file system (REQUIRED config for ipfs mode -> NEDspeed=250, SupHALO=True, TurboUse=True. RNG hardware is NOT required as it will pull the data remotely.)
-SupHALO = True  # Set to 'True' for full (8 bitstream) QByte processing. Not reccomended for slower computers.
-TurboUse = True  # Set to 'True' only if you have a TurboRNG (https://ubld.it/products/truerngpro) or are running with RandomSrc = 'ipfs'. If set to 'True' while RandomSrc = 'prng', pseudo RNG will be used to simulate TurboRNG.
+RandomSrc = 'trng'  # Using TrueRNG hardware
+SupHALO = True  # Set to 'True' for full (8 bitstream) QByte processing
+TurboUse = False  # Set to False since we're using regular TrueRNG, not TurboRNG
 # The TurboRNG acts as a reliable high-speed data source that neuromorphically entangles together the two hemispheres (4 devices on each) of the Q-Byte processing.
 # trouble may occur if using Turbo without NEDs
 
@@ -1046,7 +1055,10 @@ def animate(i):
     
     global ColorWords
     global ColorWeights
-
+    global Rpos  # Add global declaration
+    
+    Rpos = len(ult_t)-Rot_t[-1]  # Initialize Rpos
+    
     ax1.clear()
     ax2.clear()
     ax3.clear()
