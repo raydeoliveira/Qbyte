@@ -26,7 +26,7 @@ outpath = os.getcwd()
 anlzfile = [sys.argv[1]]
 
 for a in range (0,len(anlzfile)):
-    readFile = open('%s\%s'%(outpath,anlzfile[a]),'r')
+    readFile = open(f'{outpath}/{anlzfile[a]}', 'r')
     if a==0:
         sepfile = readFile.read().split('\n')
     else:

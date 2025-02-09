@@ -15,40 +15,35 @@ outpath = os.getcwd()
 name = sys.argv[1]
 infile = sys.argv[2]
 
+words = []
+special_words = []
+special_rgb = []
+special_size = []
 
-
-Words = []
-
-SpWords = []
-SpRGB = []
-SpSize = []
-
-readFile = open('%s/%s'%(outpath,infile),'r')
-lines = readFile.read().split('\n')
-for a in range (0,len(lines)):
+readfile = open(f'{outpath}/{infile}', 'r')
+lines = readfile.read().split('\n')
+for a in range(0, len(lines)):
     if 'QBYTE' in lines[a]:
-        xandy = lines[a].split(',')
-        time = int(xandy[-2])
-        Words.append(xandy[-1][8:])
+        x_and_y = lines[a].split(',')
+        time = int(x_and_y[-2])
+        words.append(x_and_y[-1][8:])
     if 'color' in lines[a] and '|' not in lines[a]:
-        xandy = lines[a].split(',')
-        SpWords.append(Words[-1])
-        SpRGB.append('rgb(%d,%d,%d)'%(int(xandy[3]),int(xandy[4]),int(xandy[5])))
-        SpSize.append(int(float(xandy[6])))
-
+        x_and_y = lines[a].split(',')
+        special_words.append(words[-1])
+        special_rgb.append(f'rgb({int(x_and_y[3])},{int(x_and_y[4])},{int(x_and_y[5])})')
+        special_size.append(int(float(x_and_y[6])))
 
 # make decoy words:
-            
-AllLO=[]
-Readfile=open('%s/Wordbank.txt'%outpath,encoding='latin-1')
-Lines=Readfile.read().split('\n')
-for line in range(0,len(Lines)):
-    AllLO.append(Lines[line])
+all_words = []
+readfile = open(f'{outpath}/Wordbank.txt', encoding='latin-1')
+lines = readfile.read().split('\n')
+for line in range(0, len(lines)):
+    all_words.append(lines[line])
 
-Decoy = []
-for a in range (0,len(Words)):
-    DecoyIdx = np.random.randint(0,196608)
-    Decoy.append(AllLO[DecoyIdx])
+decoy = []
+for a in range(0, len(words)):
+    decoy_idx = np.random.randint(0, 196608)
+    decoy.append(all_words[decoy_idx])
 
 """
 
@@ -59,13 +54,13 @@ else:
     LabelFile = ['B','A']
     
 outfile = open('%s/%s_Wordlist%s.txt'%(outpath,name,LabelFile[0]),'w')
-for a in range (0,len(Words)):
-    outfile.write('%s\n'%Words[a])
+for a in range (0,len(words)):
+    outfile.write('%s\n'%words[a])
 outfile.close()
 
 outfile = open('%s/%s_Wordlist%s.txt'%(outpath,name,LabelFile[1]),'w')
-for a in range (0,len(Decoy)):
-    outfile.write('%s\n'%Decoy[a])
+for a in range (0,len(decoy)):
+    outfile.write('%s\n'%decoy[a])
 outfile.close()
 
 outfile = open('%s/%s_Target.txt'%(outpath,name),'w')
@@ -88,10 +83,10 @@ for a in range (0,len(lines)):
 DeWords = []
 DeRGB = []
 DeSize = []
-for a in range (0,len(SpWords)):
-    LclDecoyIdx = np.random.randint(0,len(Decoy))
+for a in range (0,len(special_words)):
+    LclDecoyIdx = np.random.randint(0,len(decoy))
     LclRGBIdx = np.random.randint(0,len(DecoyRGB))
-    DeWords.append(Decoy[LclDecoyIdx])
+    DeWords.append(decoy[LclDecoyIdx])
     DeRGB.append(DecoyRGB[LclRGBIdx])
     DeSize.append(DecoySize[LclRGBIdx])
     
@@ -100,9 +95,9 @@ for a in range (0,len(SpWords)):
 
 def my_color_func(word, font_size, position, orientation, random_state=None, **kwargs):
     rcolor = 'rgb(255,255,255)'
-    for a in range (0,len(SpWords)):
-        if SpWords[a]==word:
-            rcolor = SpRGB[a]
+    for a in range (0,len(special_words)):
+        if special_words[a]==word:
+            rcolor = special_rgb[a]
     return rcolor
 
     
@@ -110,11 +105,11 @@ def my_color_func(word, font_size, position, orientation, random_state=None, **k
 stopwords = set(STOPWORDS)
 
 my_words = []
-for a in range (0,len(SpWords)):
-    for b in range (0,SpSize[a]):
-        my_words.append(SpWords[a])
-for a in range (0,len(Words)):
-    my_words.append(Words[a])
+for a in range (0,len(special_words)):
+    for b in range (0,special_size[a]):
+        my_words.append(special_words[a])
+for a in range (0,len(words)):
+    my_words.append(words[a])
 random.shuffle(my_words)
 wordtext = ''
 for a in range (0,len(my_words)):
@@ -144,8 +139,8 @@ my_decoy = []
 for a in range (0,len(DeWords)):
     for b in range (0,DeSize[a]):
         my_decoy.append(DeWords[a])
-for a in range (0,len(Decoy)):
-    my_decoy.append(Decoy[a])
+for a in range (0,len(decoy)):
+    my_decoy.append(decoy[a])
 random.shuffle(my_decoy)
 wordtextD = ''
 for a in range (0,len(my_decoy)):
