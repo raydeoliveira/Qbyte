@@ -1,10 +1,13 @@
 import matplotlib
 matplotlib.use('TkAgg')  # Set the backend before other matplotlib imports
 
-from mpl_toolkits.mplot3d import Axes3D  # required import for some machines to render 3d projection
-import matplotlib.pyplot as plt
+import logging
+import threading
+from datetime import datetime
+from queue import Queue, Empty
+from threading import Lock, Thread, Event
+from collections import defaultdict
 import numpy as np
-import matplotlib.animation as animation
 import os
 import subprocess
 import json
@@ -23,6 +26,21 @@ from astral import LocationInfo
 import datetime
 from astral.sun import sunrise,sunset
 from urllib.request import urlopen as uReq
+
+from config import (
+    RNGConfig, 
+    VisualizationConfig,
+    ProcessingConfig,
+    OutputConfig,
+    IPFSConfig,
+    PathConfig,
+    runtime_config,
+    update_runtime_config
+)
+from rng_manager import RNGManager
+
+# Initialize RNG manager
+rng_manager = RNGManager()
 
 os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Silence Tk deprecation warnings on macOS
 warnings.simplefilter('ignore')
@@ -66,60 +84,48 @@ Default_Prompt = 'hypercube algorithmic language oracle'#Prompt for Stable Diffu
 
 ###########END USER CONFIGURATION###########
 
+# Initialize configuration from command line arguments
 try:
-    mType = sys.argv[1]#static,auto,nye
+    runtime_config['session_type'] = sys.argv[1]  # static,auto,nye
 except:
-    mType = 'static'
+    runtime_config['session_type'] = 'static'
 
 try:
-    Rmks = sys.argv[2]#remarks
+    runtime_config['remarks'] = sys.argv[2]  # remarks
 except:
-    Rmks = '_'
+    runtime_config['remarks'] = '_'
 
-
-
-outpath = os.getcwd()
-if os.path.exists('%s/dataout'%outpath)==False:
+# Create output directory if needed
+if not os.path.exists(PathConfig.DATA_DIR):
     subprocess.check_output('mkdir dataout', shell=True)
 
+os.chdir(PathConfig.WORKSPACE_ROOT)
 
-os.chdir('%s'%outpath)
-
-TurboSpeed = NEDspeed
-
-if RandomSrc=='prng':
-    HALO = False
-else:
-    HALO = True
-
+# Set derived parameters
+TurboSpeed = RNGConfig.SPEED
+HALO = True if RNGConfig.SOURCE != 'prng' else False
+NumNeds = RNGConfig.NUM_DEVICES
 
 starttime = int(time.time()*1000)
-outfile = open('%s/dataout/QB_%d_0_%s.txt'%(outpath,int(starttime/1000),Rmks),'w')
-cmtfile = open('%s/dataout/QB_%d_%s_C.txt'%(outpath,int(starttime/1000),Rmks),'w')
-imgfile = open('%s/dataout/QB_%d_%s_SD.txt'%(outpath,int(starttime/1000),Rmks),'w')
+outfile = open(f'{PathConfig.DATA_DIR}/QB_{int(starttime/1000)}_0_{runtime_config["remarks"]}.txt', 'w')
+cmtfile = open(f'{PathConfig.DATA_DIR}/QB_{int(starttime/1000)}_{runtime_config["remarks"]}_C.txt', 'w')
+imgfile = open(f'{PathConfig.DATA_DIR}/QB_{int(starttime/1000)}_{runtime_config["remarks"]}_SD.txt', 'w')
 
-
-outfile.write('ColorZ: %f RotZ: %f RNG params: %s %s %s\n'%(ColorZ,RotZ,RandomSrc,HALO,TurboUse))
-
-if SupHALO==True:
-    NumNeds = 8
-else:
-    NumNeds = 4
+# Write initial configuration
+outfile.write(f'ColorZ: {ProcessingConfig.COLOR_Z} RotZ: {ProcessingConfig.ROT_Z} RNG params: {RNGConfig.SOURCE} {HALO} {RNGConfig.TURBO_MODE}\n')
 
 DayStarted = starttime - (starttime%86400000)
 StartXT = (starttime-DayStarted)/3600000
 
+# Calculate thresholds
+EX = RNGConfig.SPEED * 4
+ColorThres = ProcessingConfig.COLOR_Z * ((RNGConfig.SPEED*8*0.25)**0.5)
+RotThres = ProcessingConfig.ROT_Z * ((RNGConfig.SPEED*8*0.25)**0.5)
 
-EX = NEDspeed*4
-ColorThres = ColorZ * ((NEDspeed*8*0.25)**0.5)
-RotThres = RotZ * ((NEDspeed*8*0.25)**0.5)
-
-
-ActionNumC = math.ceil((ColorZ*((8*NEDspeed*0.25)**0.5))+(4*NEDspeed))
-Pmod_Color = (scipy.stats.binom((NEDspeed*8),0.5).sf(ActionNumC-1))*2
-ActionNumR = math.ceil((RotZ*((8*NEDspeed*0.25)**0.5))+(4*NEDspeed))
-Pmod_Rot = (scipy.stats.binom((NEDspeed*8),0.5).sf(ActionNumR-1))*2
-
+ActionNumC = math.ceil((ProcessingConfig.COLOR_Z*((8*RNGConfig.SPEED*0.25)**0.5))+(4*RNGConfig.SPEED))
+Pmod_Color = (scipy.stats.binom((RNGConfig.SPEED*8),0.5).sf(ActionNumC-1))*2
+ActionNumR = math.ceil((ProcessingConfig.ROT_Z*((8*RNGConfig.SPEED*0.25)**0.5))+(4*RNGConfig.SPEED))
+Pmod_Rot = (scipy.stats.binom((RNGConfig.SPEED*8),0.5).sf(ActionNumR-1))*2
 
 #create zoomed std arrays
 
@@ -129,8 +135,8 @@ Rstd_zoom=[]
 Mstd_zoom=[]
 
 for a in range (0,60):
-    ax1s_zoom.append(((a*NEDspeed*8*0.25)**0.5)*1.96)
-    ax1sN_zoom.append(((a*NEDspeed*8*0.25)**0.5)*-1.96)
+    ax1s_zoom.append(((a*RNGConfig.SPEED*8*0.25)**0.5)*1.96)
+    ax1sN_zoom.append(((a*RNGConfig.SPEED*8*0.25)**0.5)*-1.96)
     Rstd_zoom.append(((a*Pmod_Rot*(1-Pmod_Rot))**0.5)*1.65)
     Mstd_zoom.append(((a*Pmod_Color*(1-Pmod_Color))**0.5)*1.65)
 
@@ -268,7 +274,7 @@ def MkShape(shp):
         Node=[]
         sNode = []
         
-        readFile = open('%s/HypercubeExt.txt'%outpath,'r')
+        readFile = open('%s/HypercubeExt.txt'%PathConfig.WORKSPACE_ROOT,'r')
         sepfile = readFile.read().split('\n')
         for a in range (0,len(sepfile)):
             xandy = sepfile[a].split('\t')
@@ -422,7 +428,7 @@ def MkShape(shp):
     infile = 'sim_%s'%shp
 
     SimMI = []    
-    readFile = open('%s/%s.txt'%(outpath,infile),'r')
+    readFile = open('%s/%s.txt'%(PathConfig.WORKSPACE_ROOT,infile),'r')
     sepfile = readFile.read().split('\n')
     for a in range (0,len(sepfile)-1):
         SimMI.append(float(sepfile[a]))
@@ -460,15 +466,15 @@ def newfile(n):
 
     if PushEstuary==True:
         try:
-            estout = subprocess.check_output('curl -X POST https://shuttle-5.estuary.tech/content/add -H "Authorization: Bearer EST99cd9b05-5075-47b4-9897-f702f2e2ba2dARY" -H "Accept: application/json" -H "Content-Type: multipart/form-data" -F "data=@%s/QB_%d_%d_%s.txt"'%(outpath,int(starttime/1000),n-1,Rmks), shell=True)
+            estout = subprocess.check_output('curl -X POST https://shuttle-5.estuary.tech/content/add -H "Authorization: Bearer EST99cd9b05-5075-47b4-9897-f702f2e2ba2dARY" -H "Accept: application/json" -H "Content-Type: multipart/form-data" -F "data=@%s/QB_%d_%d_%s.txt"'%(PathConfig.WORKSPACE_ROOT,int(starttime/1000),n-1,runtime_config["remarks"]), shell=True)
             estjson = json.loads(estout)
             cid = estjson["cid"]
             eststr = 'curl -X POST https://api.estuary.tech/collections/add-content -d' + " '{ " + '"contents": [], "cids": ["' + cid + '"], "coluuid": "%s" }'%EstuaryCollection + "' -H " + '"Content-Type: application/json" -H "Authorization: Bearer EST99cd9b05-5075-47b4-9897-f702f2e2ba2dARY"'
             os.system('%s'%eststr)
         except:
-            print("Estuary Upload %d_%d_%s Failed"%(int(starttime/1000),n-1,Rmks))
+            print("Estuary Upload %d_%d_%s Failed"%(int(starttime/1000),n-1,runtime_config["remarks"]))
 
-    outfile = open('%s/dataout/QB_%d_%d_%s.txt'%(outpath,int(starttime/1000),n,Rmks),'w')
+    outfile = open('%s/dataout/QB_%d_%d_%s.txt'%(PathConfig.WORKSPACE_ROOT,int(starttime/1000),n,runtime_config["remarks"]),'w')
 
 def printInput():
     inp = inputtxt.get(1.0, "end-1c")
@@ -584,7 +590,7 @@ bimg.on_clicked(show_diffusion)
 
 
 AllLO=[]
-Readfile=open('%s/Wordbank.txt'%outpath,encoding='latin-1')
+Readfile=open('%s/Wordbank.txt'%PathConfig.WORKSPACE_ROOT,encoding='latin-1')
 Lines=Readfile.read().split('\n')
 for line in range(0,len(Lines)):
     AllLO.append(Lines[line])
@@ -592,7 +598,7 @@ for line in range(0,len(Lines)):
 
 if Genome==True:
     GenomeBin = ['CC','CG','CA','CT','GC','GG','GA','GT','AC','AG','AA','AT','TC','TG','TA','TT']
-    Readfile = open('%s/%s'%(outpath,GenomeSrc),'r')
+    Readfile = open('%s/%s'%(PathConfig.WORKSPACE_ROOT,GenomeSrc),'r')
     sepfile = Readfile.read().split('\n')
     PreSeq = []
     for a in range (21,len(sepfile)):
@@ -623,42 +629,34 @@ if RandomSrc=='trng':
         if HALO==True:
             if temp[1].startswith("TrueRNG"):
                 if 'pro' in temp[1]:
-                    print('found pro')
+                    logger.info('Found TrueRNG Pro device at %s', str(temp[0]))
                     turbocom = str(temp[0])
                 else:
-                    print('Found:           ' + str(temp))
+                    logger.info('Found TrueRNG device at %s: %s', str(temp[0]), str(temp))
                     rngcomports.append(str(temp[0]))
         else:
             if temp[1].startswith("TrueRNG"):
-                print('found device')
+                logger.info('Found single TrueRNG device at %s', str(temp[0]))
                 turbocom = str(temp[0])
             
     if HALO==True:
         ser = []            
         for a in range(0,len(rngcomports)):
-            ser.append(serial.Serial(port=rngcomports[a],timeout=10))    
+            try:
+                device = serial.Serial(port=rngcomports[a],timeout=10)
+                ser.append(device)
+                logger.debug('Successfully opened serial port %s', rngcomports[a])
+            except Exception as e:
+                logger.error('Failed to open serial port %s: %s', rngcomports[a], str(e))
+                raise
+    
     if TurboUse==True:
-        turboser = (serial.Serial(port=turbocom,timeout=10)) 
-    
-    
-               
-    #print('Using com port:  ' + str(rng1_com_port))
-    #print('Using com port:  ' + str(rng2_com_port))
-    #print('==================================================')
-    sys.stdout.flush()
-    
-    if HALO==True:
-        for a in range(0,len(rngcomports)):
-            if ser[a].isOpen() == False:
-                ser[a].open()
-            
-            ser[a].setDTR(True)
-            ser[a].flushInput()
-    if TurboUse==True:
-        if turboser.isOpen()==False:
-            turboser.open()
-        turboser.setDTR(True)
-        turboser.flushInput()
+        try:
+            turboser = serial.Serial(port=turbocom,timeout=10)
+            logger.debug('Successfully opened TurboRNG port %s', turbocom)
+        except Exception as e:
+            logger.error('Failed to open TurboRNG port %s: %s', turbocom, str(e))
+            raise
         
         sys.stdout.flush()
 else:
@@ -695,180 +693,109 @@ def Color2Prompt (Cwords,Cweights,x_words):
 
 
 def Bulk():
+    """
+    Main data processing function that retrieves quantum bytes from the RNG aggregator.
     
+    This function coordinates the retrieval of data from all RNG devices through
+    the RNG aggregator, processes it according to the current configuration,
+    and prepares it for visualization and analysis.
+    
+    Returns:
+        tuple: (x, bitct, symbol, wrd, allsums)
+            - x: Processed quantum byte stream
+            - bitct: Total bit count
+            - symbol: Symbol representing the quantum state
+            - wrd: Selected word from the oracle
+            - allsums: Sum of bits from each device
+    """
     pct = []
-    allsums=[]
+    allsums = []
     
-
-    
-    for a in range (0,9):
+    for a in range(0, 9):
         pct.append([])
         
-    if TurboUse==True:
-    
-        if RandomSrc=='trng':
-            turboser.flushInput()
-            supernode = turboser.read(TurboSpeed)#CHG
-        if RandomSrc=='ipfs':
-            supernode = GrabIPFS()
-        if RandomSrc=='prng':
-            supernode = np.random.randint(0,256,TurboSpeed)
+    if RNGConfig.SOURCE in ['trng', 'mock']:
+        try:
+            regular_data, turbo_data = rng_manager.read_data()
             
-        tempsum = 0
-        for b in range (0,len(supernode)):
-            outfile.write('%d,'%(supernode[b]))
-            pct[8].append(supernode[b])
+            # Process regular device data
+            for i, data in enumerate(regular_data):
+                if data:
+                    tempsum = sum(1 for byte in data for bit in bin(byte)[2:].zfill(8) if bit == '1')
+                    for b in data:
+                        outfile.write('%d,' % b)
+                        pct[i].append(b)
+                    allsums.append(tempsum)
+                    outfile.write('%d,%s\n' % (int(time.time()*1000), 
+                                             rngcomports[i%len(rngcomports)] if RNGConfig.SOURCE == 'trng' else f'mock_{i}'))
             
+            # Process TurboRNG data if available
+            if turbo_data:
+                tempsum = sum(1 for byte in turbo_data for bit in bin(byte)[2:].zfill(8) if bit == '1')
+                for b in turbo_data:
+                    outfile.write('%d,' % b)
+                    pct[8].append(b)
+                outfile.write('%d,T\n' % (int(time.time()*1000)))
+                allsums.append(tempsum)
             
-            #allnodes.append(supernode[b])
-            strnode = str(bin(256+int(supernode[b])))[3:]
-            tempsum += (int(strnode[0])+int(strnode[1])+int(strnode[2])+int(strnode[3])+int(strnode[4])+int(strnode[5])+int(strnode[6])+int(strnode[7]))
-        outfile.write('%d,T\n'%(int(time.time()*1000)))
-        
-        allsums.append(tempsum)
-        
-    for a in range(0,NumNeds):
-        if (HALO==True or TurboUse==False) and RandomSrc=='trng':
-            try:
-                ser[a%len(ser)].flushInput()
-                node = ser[a%len(ser)].read(NEDspeed)
-            except:
-                node = []
-        else:
-            if RandomSrc=='trng':
-                node = turboser.read(NEDspeed)
-            if RandomSrc=='prng':
-                node = np.random.randint(0,256,NEDspeed)
-            if RandomSrc=='ipfs':
-                node = GrabIPFS()
-        #print (a,len(node),TotalRuns)
-        while len(node)==0:
-            print('BAD READ ON %s ... removing'%rngcomports[a%len(ser)])
-            ser.remove(ser[a%len(ser)])
-            #bads[a] += 1
-            try:
-                ser[a%len(ser)].flushInput()
-                node = ser[a%len(ser)].read(NEDspeed)
-            except:
-                node = []
-       
-        tempsum = 0
-        for mm in range (0,NEDspeed):
-            outfile.write('%d,'%(node[mm]))
-            strnum = bin(256+node[mm])[3:]
-            pct[a].append(node[mm])
+            # Combine all data for processing
+            x = []
+            for data in regular_data:
+                if data:
+                    x.extend(data)
+            if turbo_data:
+                x.extend(turbo_data)
+                
+        except Exception as e:
+            logger.error("Error in Bulk processing: %s", str(e))
+            return None
             
-            strnode = str(strnum)
-            tempsum += (int(strnode[0])+int(strnode[1])+int(strnode[2])+int(strnode[3])+int(strnode[4])+int(strnode[5])+int(strnode[6])+int(strnode[7]))
-        allsums.append(tempsum)
-        outfile.write('%d,%s\n'%(int(time.time()*1000),rngcomports[a%len(ser)]))
-        
-    x = []#CHG should be NEDspeed long
+    elif RNGConfig.SOURCE == 'prng':
+        x = list(np.random.randint(0, 256, RNGConfig.SPEED))
+    elif RNGConfig.SOURCE == 'ipfs':
+        x = GrabIPFS()
+    else:
+        logger.error(f"Unsupported RNG source: {RNGConfig.SOURCE}")
+        return None
     
-    Pur0 = pct[0]
-    Pur1 = pct[1]
-    Pur2 = pct[2]
-    Pur3 = pct[3]
-    Pur4 = pct[4]
-    Pur5 = pct[5]
-    Pur6 = pct[6]
-    Pur7 = pct[7]
-    if TurboUse==True:
-        PurT = pct[8]
+    # Calculate final bit count
+    bitct = sum(1 for byte in x for bit in bin(byte)[2:].zfill(8) if bit == '1')
     
-    #This is where the magic occurs:
-    GenomeIdx = ((Pur0[0]*(256**2)) + (Pur0[1]*(256**1)) + (Pur0[2]*(256**0)))
-
-    for b in range (0,len(Pur0)):
-        
-        if SupHALO==True:
-            xA = Pur0[b]^Pur7[b]
-            xB = Pur1[b]^Pur6[b]
-            xC = Pur2[b]^Pur5[b]
-            xD = Pur3[b]^Pur4[b]
-        
-            xE = xA^xD
-            xF = xB^xC
-        else:
-        
-            xE = Pur0[b]^Pur3[b]
-            xF = Pur1[b]^Pur2[b]
-        
-        xG = xE^xF
-        
-        if TurboUse==True:
-            xH = xG^PurT[b]
-        else:
-            xH = xG
-
-        if Genome==True:
-            GenomeIdxX = (GenomeIdx+b)%len(GenomeBits)
-            xDNA = xH ^ GenomeBits[GenomeIdxX]
-        else:
-            xDNA = xH
-        
-        x.append(xDNA)
-
-        
-        
-        
-        
-
-
-    
-
-    
-    #OG:
-    #ser.flushInput()
-    #x = ser.read(NEDspeed)
-    
-    bitct = 0
-    for a in range (0,len(x)):
+    # Write processed data
+    for a in range(len(x)):
         outfile.write('%d,' % x[a])
-        strnode = str(bin(256 + int(x[a])))[3:]
-        bitct += (int(strnode[0]) + int(strnode[1]) + int(strnode[2]) + 
-                 int(strnode[3]) + int(strnode[4]) + int(strnode[5]) + 
-                 int(strnode[6]) + int(strnode[7]))
-        
     outfile.write('%d,QBYTE | ' % (int(time.time()*1000)))
-    
-    
     
     outfile.flush()
     os.fsync(outfile.fileno())
     
+    # Process final bits for symbol and word selection
+    str0 = str(bin(256 + x[-2]))[3:] + str(bin(256 + x[-1]))[3:]
+    ones = sum(int(bit) for bit in str0)
     
-    str0 = str(bin(256+int(x[-2])))[3:] + str(bin(256+int(x[-1])))[3:]
-    ones = int(str0[0])+int(str0[1])+int(str0[2])+int(str0[3])+int(str0[4])+int(str0[5])+int(str0[6])+int(str0[7])+int(str0[8])+int(str0[9])+int(str0[10])+int(str0[11])+int(str0[12])+int(str0[13])+int(str0[14])+int(str0[15])
-
-    #cat = np.random.randint(0,3)
-    
+    # Select sector and word
     uidx = -3
     sector = -9999
     while sector < -1:
         if x[uidx] < 252:
-            sector = x[uidx]%3
+            sector = x[uidx] % 3
         uidx -= 1
     
-    
-    
-    LO_idx = ((sector%3)*65536)+(x[-2]*256)+x[-1]
+    LO_idx = ((sector % 3) * 65536) + (x[-2] * 256) + x[-1]
     wrd = AllLO[LO_idx]
-
-    Z = np.abs(ones-8)
-
-    if ones==8:
-        symbol = '.0'
-    if ones<8:
-        symbol = '.-%d'%Z
-    if ones>8:
-        symbol = '.+%d'%Z
-
-    outfile.write('%s\n'%wrd)
-        
-    #print(len(x))
     
-    return x,bitct,symbol,wrd,allsums
+    # Calculate symbol
+    Z = abs(ones - 8)
+    if ones == 8:
+        symbol = '.0'
+    elif ones < 8:
+        symbol = '.-%d' % Z
+    else:
+        symbol = '.+%d' % Z
+    
+    outfile.write('%s\n' % wrd)
+    
+    return x, bitct, symbol, wrd, allsums
 
 maxon = 65535
 def GetColors(colors,typidx):
@@ -912,7 +839,7 @@ def GetColors(colors,typidx):
 
 
 #shape initialization:
-if mType == 'nye':
+if runtime_config['session_type'] == 'nye':
     targettime = int(sys.argv[3])
 RadList = []
 for a in range (0,10):
@@ -1107,7 +1034,7 @@ def animate(i):
     
 
     
-    if mType=='auto':
+    if runtime_config['session_type']=='auto':
         if len(ult_t)%autofreq==0 and len(ult_t)>0:
             autoview()
     
@@ -1117,7 +1044,7 @@ def animate(i):
     
 
     
-    if mType=='nye':
+    if runtime_config['session_type']=='nye':
         timetodest = targettime - now_p
     else:
         timetodest = None
@@ -1315,7 +1242,6 @@ def animate(i):
     axQB.append(np.sum(QBsums)-(len(ult_t)*NEDspeed*8*0.5))
     for a in range(0,len(Xsums)):
         ax1y[a].append(np.sum(Xsums[a])-(len(ult_t)*NEDspeed*8*0.5))
-        #print(a,(np.sum(Xsums[a])-(len(ult_t)*NEDspeed*8*0.5)))
     ax1s.append(((len(ult_t)*NEDspeed*8*0.25)**0.5)*1.96)
     ax1sN.append(((len(ult_t)*NEDspeed*8*0.25)**0.5)*-1.96)
     
@@ -1388,4 +1314,26 @@ def animate(i):
                 
 ani = animation.FuncAnimation(fig, animate, interval=1000)
 
-plt.show()
+if __name__ == '__main__':
+    try:
+        # Initialize RNG devices
+        if not rng_manager.initialize_devices():
+            logger.error("Failed to initialize RNG devices")
+            sys.exit(1)
+            
+        if runtime_config['session_type']=='static':
+            ani = animation.FuncAnimation(fig, animate, interval=1000)
+        if runtime_config['session_type']=='auto':
+            ani = animation.FuncAnimation(fig, animate, interval=1000)
+        if runtime_config['session_type']=='nye':
+            ani = animation.FuncAnimation(fig, animate, interval=1000)
+            
+        plt.show()
+    finally:
+        rng_manager.cleanup()
+        if 'outfile' in globals():
+            outfile.close()
+        if 'cmtfile' in globals():
+            cmtfile.close()
+        if 'imgfile' in globals():
+            imgfile.close()

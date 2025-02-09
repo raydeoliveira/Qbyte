@@ -1,3 +1,182 @@
+# QByte: Quantum Random Number Generator Analysis Suite
+
+A comprehensive toolkit for analyzing quantum random number generation using TrueRNG devices, with support for coherence detection, statistical analysis, and visualization.
+
+## Features
+
+- Real-time quantum random number data acquisition from TrueRNG devices
+- Mock RNG support for testing and development
+- Advanced coherence detection algorithms
+- Statistical analysis including Cohen's d effect size calculation
+- Parameter optimization through automated sweeps
+- Real-time visualization of quantum data patterns
+- Comprehensive data logging and event tracking
+- Support for both single-session and long-term monitoring
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8 or higher
+- macOS, Linux, or Windows with appropriate USB drivers
+- TrueRNG device(s) for hardware-based testing
+
+### Dependencies Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/Qbyte.git
+   cd Qbyte
+   ```
+
+2. Create and activate a virtual environment (recommended):
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. Install required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+Key dependencies include:
+- numpy
+- matplotlib
+- pyserial
+- scipy
+- astral
+- tkinter (usually comes with Python)
+
+## Usage Scenarios
+
+### 1. Basic RNG Data Collection
+
+#### With Physical TrueRNG Device:
+```bash
+python QByte.py static
+```
+
+#### With Mock RNG (for testing):
+```bash
+python QByte.py static --source mock
+```
+
+### 2. Parameter Sweep Analysis
+
+Run a comprehensive sweep of Z-score thresholds to optimize coherence detection:
+
+```bash
+python parameter_sweep.py
+```
+
+Key features:
+- Automatically tests range of color and rotation Z-scores
+- Generates visualization of threshold vs event relationships
+- Saves detailed results to CSV
+- Produces summary statistics and optimal threshold recommendations
+
+### 3. Coherence Monitoring Session
+
+#### Quick Pilot Session (10 minutes):
+```bash
+python run_coherence_session.py --duration 600 --source trng
+```
+
+#### Testing with Mock Data:
+```bash
+python run_coherence_session.py --duration 300 --source mock
+```
+
+Options:
+- `--duration`: Session length in seconds
+- `--source`: 'trng' for TrueRNG device, 'mock' for testing
+- `--color-z`: Color coherence Z-score threshold
+- `--rot-z`: Rotation coherence Z-score threshold
+- `--outdir`: Custom output directory
+
+### 4. Automated Long-term Monitoring
+
+```bash
+python QByte.py auto
+```
+
+## Data Output
+
+The system generates several types of output files:
+
+1. Raw Data Files:
+   - `QB_TIMESTAMP_REMARKS.txt`: Raw byte streams and events
+   - `raw_data_TIMESTAMP.csv`: Detailed device readings
+
+2. Analysis Results:
+   - `zscore_sweep_TIMESTAMP.csv`: Parameter sweep results
+   - `zscore_sweep_TIMESTAMP.png`: Visualization plots
+   - `statistics_TIMESTAMP.txt`: Statistical analysis including Cohen's d
+
+3. Event Logs:
+   - `events_TIMESTAMP.log`: Detected coherence events
+   - `QB_TIMESTAMP_REMARKS_C.txt`: User comments and annotations
+
+## Configuration
+
+Key configuration files:
+
+1. `config.py`: Central configuration system
+   - RNG device settings
+   - Processing parameters
+   - Visualization options
+   - Output paths
+
+2. `pytest.ini`: Test configuration
+   - Logging settings
+   - Test discovery rules
+
+## Statistical Analysis
+
+The system now includes advanced statistical analysis:
+
+- Baseline vs. Focus Period Comparison
+  - First 2 minutes used as baseline
+  - Remaining time as focus period
+  - Cohen's d effect size calculation
+  - Automatic interpretation of effect sizes
+
+## Troubleshooting
+
+Common issues and solutions:
+
+1. TrueRNG Device Not Detected:
+   - Check USB connection
+   - Verify device permissions
+   - Ensure proper drivers are installed
+
+2. Visualization Issues:
+   - Confirm matplotlib backend configuration
+   - Check for tkinter installation
+   - Verify display server connection
+
+3. Performance Concerns:
+   - Adjust buffer sizes in config.py
+   - Monitor system resource usage
+   - Consider using mock devices for testing
+
+## Contributing
+
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request with detailed description
+
+## License
+
+[Your License Information Here]
+
+## Contact
+
+[Your Contact Information Here]
+
 ## Qbyte.py
 Data Visualization for Hybrid-Quantum Clock featuring Q-Byte Processing
 
