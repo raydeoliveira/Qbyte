@@ -24,30 +24,30 @@ warnings.simplefilter('ignore')
 
 ###########CONFIGURE HERE###########
 
-ColorZ = 1.65#Z-score in the QByte bitstream where colors change
-RotZ = 1.85#Z-score in the QByte bitstream where rotation occurs
+ColorZ = 1.65  # Z-score in the QByte bitstream where colors change
+RotZ = 1.85  # Z-score in the QByte bitstream where rotation occurs
 
 DotSize = 4444
 wordsize = 36
-Default_Marker = 'o'#for a full list: https://matplotlib.org/stable/api/markers_api.html
+Default_Marker = 'o'  # for a full list: https://matplotlib.org/stable/api/markers_api.html
 
-NEDspeed = 250#Number of bytes to stream from the RNG each second
-RandomSrc = 'prng'#'trng' = TrueRNG hardware (https://ubld.it/truerng_v3) ... 'prng' = pseudo RNG ... 'ipfs' = interplenetary file system (REQUIRED config for ipfs mode -> NEDspeed=250, SupHALO=True, TurboUse=True. RNG hardware is NOT required as it will pull the data remotely.)
-SupHALO = True#Set to 'True' for full (8 bitstream) QByte processing. Not reccomended for slower computers.
-TurboUse = True#Set to 'True' only if you have a TurboRNG (https://ubld.it/products/truerngpro) or are running with RandomSrc = 'ipfs'. If set to 'True' while RandomSrc = 'prng', pseudo RNG will be used to simulate TurboRNG.
-#The TurboRNG acts as a reliable high-speed data source that neuromorphically entangles together the two hemispheres (4 devices on each) of the Q-Byte processing.
-#trouble may occur if using Turbo without NEDs
+NEDspeed = 250  # Number of bytes to stream from the RNG each second
+RandomSrc = 'prng'  # 'trng' = TrueRNG hardware (https://ubld.it/truerng_v3) ... 'prng' = pseudo RNG ... 'ipfs' = interplenetary file system (REQUIRED config for ipfs mode -> NEDspeed=250, SupHALO=True, TurboUse=True. RNG hardware is NOT required as it will pull the data remotely.)
+SupHALO = True  # Set to 'True' for full (8 bitstream) QByte processing. Not reccomended for slower computers.
+TurboUse = True  # Set to 'True' only if you have a TurboRNG (https://ubld.it/products/truerngpro) or are running with RandomSrc = 'ipfs'. If set to 'True' while RandomSrc = 'prng', pseudo RNG will be used to simulate TurboRNG.
+# The TurboRNG acts as a reliable high-speed data source that neuromorphically entangles together the two hemispheres (4 devices on each) of the Q-Byte processing.
+# trouble may occur if using Turbo without NEDs
 
-IPFS_Estuary = True#if RandomSrc = 'ipfs', 'True' will pull from Estuary, 'False' will pull from web3.storage
+IPFS_Estuary = True  # if RandomSrc = 'ipfs', 'True' will pull from Estuary, 'False' will pull from web3.storage
 
-Genome = False#set to 'True' to XOR with genome from 23 and me data file (beta feature). Turns nucleotide information (A,G,C,T) into bits that factor in to the QByte output.
-GenomeSrc = 'GenomeSample.txt'#Genome source data (this is where you can upload your DNA file from 23 and Me), ignored if Genome = 'False'
+Genome = False  # set to 'True' to XOR with genome from 23 and me data file (beta feature). Turns nucleotide information (A,G,C,T) into bits that factor in to the QByte output.
+GenomeSrc = 'GenomeSample.txt'  # Genome source data (this is where you can upload your DNA file from 23 and Me), ignored if Genome = 'False'
 
-MaxFileTime = 600#number of seconds of data to store to an individual output file
-PushEstuary = False#uploads data to Estuary at MaxFileTime interval, requires curl. REQUIRED config -> NEDspeed=250, SupHALO=True, TurboUse=True. Any RandomSrc may be used.
-EstuaryCollection = 'd0e46d0d-7e4c-4bce-8401-ee1a10b89f3d'#'bfffcaab-d302-4bab-b0ed-552e450a2dc9'
+MaxFileTime = 600  # number of seconds of data to store to an individual output file
+PushEstuary = False  # uploads data to Estuary at MaxFileTime interval, requires curl. REQUIRED config -> NEDspeed=250, SupHALO=True, TurboUse=True. Any RandomSrc may be used.
+EstuaryCollection = 'd0e46d0d-7e4c-4bce-8401-ee1a10b89f3d'  # 'bfffcaab-d302-4bab-b0ed-552e450a2dc9'
 
-autofreq = 600#how often to switch view in seconds if ran in 'auto' mode
+autofreq = 600  # how often to switch view in seconds if ran in 'auto' mode
 
 OutputImgs = False#Runs stable diffusion
 ImgTime = 900#frequency to run Stable Diffusion
@@ -612,24 +612,24 @@ if RandomSrc=='trng':
     
     for temp in ports_avaiable:
         if HALO==True:
-        	if temp[1].startswith("TrueRNG"):
-        		if 'pro' in temp[1]:
-        			print ('found pro')
-        			turbocom = str(temp[0])
-        		else:
-        			print('Found:           ' + str(temp))
-        			rngcomports.append(str(temp[0]))
+            if temp[1].startswith("TrueRNG"):
+                if 'pro' in temp[1]:
+                    print('found pro')
+                    turbocom = str(temp[0])
+                else:
+                    print('Found:           ' + str(temp))
+                    rngcomports.append(str(temp[0]))
         else:
-        	if temp[1].startswith("TrueRNG"):
-        		print ('found device')
-        		turbocom = str(temp[0])
+            if temp[1].startswith("TrueRNG"):
+                print('found device')
+                turbocom = str(temp[0])
             
     if HALO==True:
         ser = []            
         for a in range(0,len(rngcomports)):
-        	ser.append (serial.Serial(port=rngcomports[a],timeout=10))    
+            ser.append(serial.Serial(port=rngcomports[a],timeout=10))    
     if TurboUse==True:
-        turboser= (serial.Serial(port=turbocom,timeout=10)) 
+        turboser = (serial.Serial(port=turbocom,timeout=10)) 
     
     
                
@@ -640,11 +640,11 @@ if RandomSrc=='trng':
     
     if HALO==True:
         for a in range(0,len(rngcomports)):
-        	if(ser[a].isOpen() == False):
-        		ser[a].open()
-        
-        	ser[a].setDTR(True)
-        	ser[a].flushInput()
+            if ser[a].isOpen() == False:
+                ser[a].open()
+            
+            ser[a].setDTR(True)
+            ser[a].flushInput()
     if TurboUse==True:
         if turboser.isOpen()==False:
             turboser.open()
@@ -815,11 +815,13 @@ def Bulk():
     
     bitct = 0
     for a in range (0,len(x)):
-        outfile.write('%d,'%x[a])
-        strnode = str(bin(256+int(x[a])))[3:]
-        bitct += int(strnode[0])+int(strnode[1])+int(strnode[2])+int(strnode[3])+int(strnode[4])+int(strnode[5])+int(strnode[6])+int(strnode[7])        
+        outfile.write('%d,' % x[a])
+        strnode = str(bin(256 + int(x[a])))[3:]
+        bitct += (int(strnode[0]) + int(strnode[1]) + int(strnode[2]) + 
+                 int(strnode[3]) + int(strnode[4]) + int(strnode[5]) + 
+                 int(strnode[6]) + int(strnode[7]))
         
-    outfile.write('%d,QBYTE | '%(int(time.time()*1000)))
+    outfile.write('%d,QBYTE | ' % (int(time.time()*1000)))
     
     
     
@@ -1299,7 +1301,7 @@ def animate(i):
             
     QBsums.append(AC[1])
     axQB.append(np.sum(QBsums)-(len(ult_t)*NEDspeed*8*0.5))
-    for a in range (0,len(Xsums)):
+    for a in range(0,len(Xsums)):
         ax1y[a].append(np.sum(Xsums[a])-(len(ult_t)*NEDspeed*8*0.5))
         #print(a,(np.sum(Xsums[a])-(len(ult_t)*NEDspeed*8*0.5)))
     ax1s.append(((len(ult_t)*NEDspeed*8*0.25)**0.5)*1.96)
