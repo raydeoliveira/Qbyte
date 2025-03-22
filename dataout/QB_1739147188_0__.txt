@@ -1,0 +1,2 @@
+ColorZ: 1.65 RotZ: 1.85 RNG params: trng True False
+1739147192547,QBYTE | 

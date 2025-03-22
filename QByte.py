@@ -23,6 +23,120 @@ from astral import LocationInfo
 import datetime
 from astral.sun import sunrise,sunset
 from urllib.request import urlopen as uReq
+import logging
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import List, Optional
+import platform
+
+@dataclass
+class RNGData:
+    """Container for RNG device data"""
+    device_id: str
+    data: bytes
+    timestamp: float
+    
+class RNGReader:
+    """Concurrent reader for multiple RNG devices"""
+    def __init__(self, num_devices: int, buffer_size: int = 1000):
+        self.data_queue = queue.Queue(maxsize=buffer_size)
+        self.stop_event = threading.Event()
+        self.devices = []
+        self.lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=num_devices)
+        self._initialized = False
+        
+    def read_device(self, device_id: str, ser: serial.Serial, ned_speed: int):
+        """Reader thread for a single device"""
+        logger.debug(f"Reader thread started", extra={'device_id': device_id})
+        while not self.stop_event.is_set():
+            try:
+                with self.lock:  # Protect serial port access
+                    ser.flushInput()
+                    data = ser.read(ned_speed)
+                    
+                if len(data) == ned_speed:
+                    logger.debug(f"Read complete - received {len(data)} bytes", 
+                               extra={'device_id': device_id})
+                    rng_data = RNGData(
+                        device_id=device_id,
+                        data=data,
+                        timestamp=time.time()
+                    )
+                    self.data_queue.put(rng_data, timeout=1.0)
+                else:
+                    logger.warning(f"Incomplete read: {len(data)} bytes", 
+                                 extra={'device_id': device_id})
+                    
+            except Exception as e:
+                logger.error(f"Device read failed: {str(e)}", 
+                           extra={'device_id': device_id})
+                time.sleep(1)  # Back off on error
+                
+    def start_readers(self, ser_ports: List[serial.Serial], ned_speed: int):
+        """Start reader threads for all devices"""
+        if self._initialized:
+            return
+            
+        for idx, ser_port in enumerate(ser_ports):
+            device_id = f"RNG{idx}"
+            future = self.executor.submit(self.read_device, device_id, ser_port, ned_speed)
+            self.devices.append((device_id, future))
+            
+        self._initialized = True
+            
+    def get_data(self, timeout: float = 0.1) -> List[RNGData]:
+        """Get accumulated data from all devices"""
+        data = []
+        start_time = time.time()
+        max_wait = 2.0  # Maximum time to wait for all devices
+        
+        while len(data) < len(self.devices):
+            try:
+                item = self.data_queue.get(timeout=timeout)
+                data.append(item)
+            except queue.Empty:
+                if time.time() - start_time > max_wait:
+                    logger.warning(f"Timeout waiting for device data. Got {len(data)}/{len(self.devices)} devices")
+                    break
+        
+        # Sort by device ID for consistent ordering
+        data.sort(key=lambda x: int(x.device_id[3:]))
+        return data
+        
+    def stop(self):
+        """Stop all reader threads"""
+        self.stop_event.set()
+        self.executor.shutdown(wait=True)
+        self._initialized = False
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - [Device %(device_id)s] - %(message)s')
+
+# Add file handler
+fh = logging.FileHandler('qbyte_rng.log')
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+
+# Configure console handler for important messages
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch_formatter = logging.Formatter('%(levelname)s: %(message)s')
+ch.setFormatter(ch_formatter)
+logger.addHandler(ch)
+
+# Add a filter to provide default values for missing attributes
+class DefaultFilter(logging.Filter):
+    def filter(self, record):
+        if not hasattr(record, 'device_id'):
+            record.device_id = 'main'
+        return True
+
+logger.addFilter(DefaultFilter())
 
 os.environ['TK_SILENCE_DEPRECATION'] = '1'  # Silence Tk deprecation warnings on macOS
 warnings.simplefilter('ignore')
@@ -41,11 +155,10 @@ wordsize = 36
 Default_Marker = 'o'  # for a full list: https://matplotlib.org/stable/api/markers_api.html
 
 NEDspeed = 250  # Number of bytes to stream from the RNG each second
-RandomSrc = 'trng'  # Using TrueRNG hardware
+RandomSrc = 'prng'  # Using pseudo-random number generator
 SupHALO = True  # Set to 'True' for full (8 bitstream) QByte processing
 TurboUse = False  # Set to False since we're using regular TrueRNG, not TurboRNG
-# The TurboRNG acts as a reliable high-speed data source that neuromorphically entangles together the two hemispheres (4 devices on each) of the Q-Byte processing.
-# trouble may occur if using Turbo without NEDs
+UseConcurrentReading = False  # Set to True to enable concurrent RNG reading
 
 IPFS_Estuary = True  # if RandomSrc = 'ipfs', 'True' will pull from Estuary, 'False' will pull from web3.storage
 
@@ -61,11 +174,45 @@ autofreq = 600  # how often to switch view in seconds if ran in 'auto' mode
 OutputImgs = False#Runs stable diffusion
 ImgTime = 900#frequency to run Stable Diffusion
 Max_Words = 3#Maximum number of words for Stable Diffusion prompt
-STABLE_DIFFUSION_DIR = '/home/halo/halodev/stable-diffusion'#Path to working Stable Diffusion
+STABLE_DIFFUSION_DIR = os.path.expanduser('~/stable-diffusion')#Path to working Stable Diffusion
 Default_Prompt = 'hypercube algorithmic language oracle'#Prompt for Stable Diffusion if no words are generated
+Default_Word = 'QBYTE'  # Default word shown when no coherence is detected
 
 ###########END USER CONFIGURATION###########
 
+# Auto-detect TrueRNG devices if available
+def detect_trng_devices():
+    """Auto-detect TrueRNG devices and configure accordingly"""
+    global RandomSrc, TurboUse
+    
+    ports_available = list(list_ports.comports())
+    trng_ports = [p for p in ports_available if p[1].startswith("TrueRNG")]
+    
+    if trng_ports:
+        logger.info(f"Found {len(trng_ports)} TrueRNG device(s)")
+        RandomSrc = 'trng'
+        turbo_ports = [p for p in trng_ports if 'pro' in p[1].lower()]
+        if turbo_ports:
+            logger.info("TurboRNG Pro detected")
+            TurboUse = True
+        return True
+    else:
+        logger.info("No TrueRNG devices detected, using pseudo-random number generator")
+        RandomSrc = 'prng'
+        TurboUse = False
+        return False
+
+# Check if automatic device detection is enabled
+try:
+    # Only attempt auto-detection if RandomSrc is set to 'trng'
+    if RandomSrc == 'trng':
+        detect_trng_devices()
+except Exception as e:
+    logger.warning(f"Error detecting TrueRNG devices: {str(e)}. Falling back to PRNG mode.")
+    RandomSrc = 'prng'
+    TurboUse = False
+
+# Check for command line arguments
 try:
     mType = sys.argv[1]#static,auto,nye
 except:
@@ -76,12 +223,14 @@ try:
 except:
     Rmks = '_'
 
-
+# Print system information
+logger.info(f"Running QByte on {platform.system()} {platform.release()}")
+logger.info(f"Python version: {platform.python_version()}")
+logger.info(f"Configuration: Mode={mType}, RandomSrc={RandomSrc}, TurboUse={TurboUse}, SupHALO={SupHALO}")
 
 outpath = os.getcwd()
 if os.path.exists('%s/dataout'%outpath)==False:
     subprocess.check_output('mkdir dataout', shell=True)
-
 
 os.chdir('%s'%outpath)
 
@@ -92,12 +241,10 @@ if RandomSrc=='prng':
 else:
     HALO = True
 
-
 starttime = int(time.time()*1000)
 outfile = open('%s/dataout/QB_%d_0_%s.txt'%(outpath,int(starttime/1000),Rmks),'w')
 cmtfile = open('%s/dataout/QB_%d_%s_C.txt'%(outpath,int(starttime/1000),Rmks),'w')
 imgfile = open('%s/dataout/QB_%d_%s_SD.txt'%(outpath,int(starttime/1000),Rmks),'w')
-
 
 outfile.write('ColorZ: %f RotZ: %f RNG params: %s %s %s\n'%(ColorZ,RotZ,RandomSrc,HALO,TurboUse))
 
@@ -109,19 +256,14 @@ else:
 DayStarted = starttime - (starttime%86400000)
 StartXT = (starttime-DayStarted)/3600000
 
-
 EX = NEDspeed*4
 ColorThres = ColorZ * ((NEDspeed*8*0.25)**0.5)
 RotThres = RotZ * ((NEDspeed*8*0.25)**0.5)
-
 
 ActionNumC = math.ceil((ColorZ*((8*NEDspeed*0.25)**0.5))+(4*NEDspeed))
 Pmod_Color = (scipy.stats.binom((NEDspeed*8),0.5).sf(ActionNumC-1))*2
 ActionNumR = math.ceil((RotZ*((8*NEDspeed*0.25)**0.5))+(4*NEDspeed))
 Pmod_Rot = (scipy.stats.binom((NEDspeed*8),0.5).sf(ActionNumR-1))*2
-
-
-#create zoomed std arrays
 
 ax1s_zoom=[]
 ax1sN_zoom=[]
@@ -134,9 +276,6 @@ for a in range (0,60):
     Rstd_zoom.append(((a*Pmod_Rot*(1-Pmod_Rot))**0.5)*1.65)
     Mstd_zoom.append(((a*Pmod_Color*(1-Pmod_Color))**0.5)*1.65)
 
-
-####
-
 IpfsIdx = [0]
 MetaIdx = [0]
 
@@ -148,14 +287,8 @@ def NewIPFS():
         latest_cid = estuary_arr[-1]["cid"]
         data = 'https://%s.ipfs.dweb.link'%latest_cid
     else:
-
         data = 'https://bafybeievaadn5wv7xlxdto5m7nqn34q7nzdk5x4fpdh4sogrx4xkdg5ad4.ipfs.dweb.link/short/NEDpredata_%d.txt'%IpfsIdx[0]
     
-
-    #data = 'https://bafybeievaadn5wv7xlxdto5m7nqn34q7nzdk5x4fpdh4sogrx4xkdg5ad4.ipfs.dweb.link/short/NEDpredata_0.txt'
-    #data = 'https://bafybeibkvizfujdlgn34lczqphlbopd423s5p7jutglhmajobpfo5o5o2y.ipfs.dweb.link'
-
-
     print('pulling data from %s'%data)
     
     uClient = uReq(data)
@@ -177,8 +310,6 @@ def NewIPFS():
             for b in range (0,len(xandy)-2):
                 uNed.append(int(xandy[b]))
             
-            #print(uNed)
-
             MetaXX.append(uNed)
         
     IpfsIdx[0] += 1
@@ -207,7 +338,6 @@ def GrabIPFS():
     return grabbed
     
 ####
-
 
 plt.style.use('dark_background')
 #plt.grid([False])
@@ -262,8 +392,6 @@ def MkShape(shp):
         WM_ll = 1.4
         WM_ul = 4.1
         
-        #infile = 'SimulationsHC.txt'
-    
         ShapeC = []
         Node=[]
         sNode = []
@@ -282,7 +410,6 @@ def MkShape(shp):
         WM_ll = 1.4
         WM_ul = 1.42
             
-        #infile = 'Simulations_Sphere12.txt'
         ShapeC = []
         xxx=[]
         yyy=[]
@@ -327,15 +454,11 @@ def MkShape(shp):
             else:
                 Node.append(0)
                 
-        #print(np.amin(zzz),np.amax(zzz))
-    
-    
     if shp == 'pyramid':
         
         WM_ll = 0.7
         WM_ul = 2.1      
         
-        #infile = 'SimulationsHC.txt'#temp
         ShapeC = []
         x = [1,2,3,4,5,0.5,0.5,0.5,0.5,0.5,1,2,3,4,5,5.5,5.5,5.5,5.5,5.5,2,3,4,1.5,1.5,1.5,2,3,4,4.5,4.5,4.5,2.5,3.5,3,3]
         y = [0.5,0.5,0.5,0.5,0.5,1,2,3,4,5,5.5,5.5,5.5,5.5,5.5,1,2,3,4,5,1.5,1.5,1.5,2,3,4,4.5,4.5,4.5,2,3,4,3,3,2.5,3.5]
@@ -347,9 +470,6 @@ def MkShape(shp):
         plusX = [1,2,3,4,5,1,2,3,4,5,1,2,3,4,5,1,2,3,4,5,1,2,3,4,5]
         plusY = [1,1,1,1,1,2,2,2,2,2,3,3,3,3,3,4,4,4,4,4,5,5,5,5,5]
         plusZ = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-    #            [1,0,1,0,1,0,0,0,0,0,1,0,1,0,1,0,0,0,0,0,1,0,1,0,1]
-        
-        #cap and floor
         
         for a in range (0,len(x)):
             ShapeC.append([x[a],y[a],z[a]])
@@ -367,7 +487,6 @@ def MkShape(shp):
         WM_ll = 0.6
         WM_ul = 0.64    
         
-        #infile = 'Simulations_AEM10.txt'
         ShapeC = []
         for a in range (0,10):
             rads = (a/10)*2*np.pi
@@ -380,7 +499,6 @@ def MkShape(shp):
         WM_ll = 1.4
         WM_ul = 2.1  
         
-        #infile = 'Simulations_AEM10.txt'#temporary!
         ShapeC = [[2,1,0],[2,5,0],[4,1,0],[4,5,0],[1,2,0],[1,4,0],[5,2,0],[5,4,0]]
         sNode = ShapeC
         Node = [1,1,1,1,1,1,1,1]
@@ -609,61 +727,115 @@ if Genome==True:
 
 
 if RandomSrc=='trng':
-
-    
-    
-    ports=dict()  
-    ports_avaiable = list(list_ports.comports())
-    
-    
+    # Initialize variables
     rngcomports = []
+    ser = []
     turbocom = None
+    turboser = None
     
-    for temp in ports_avaiable:
-        if HALO==True:
-            if temp[1].startswith("TrueRNG"):
-                if 'pro' in temp[1]:
-                    print('found pro')
+    try:
+        ports_available = list(list_ports.comports())
+        
+        # Look for TrueRNG devices
+        logger.info("Scanning for TrueRNG devices...")
+        
+        for temp in ports_available:
+            if HALO and temp[1].startswith("TrueRNG"):
+                if 'pro' in temp[1].lower():
+                    logger.info(f"Found TurboRNG Pro device: {temp}")
                     turbocom = str(temp[0])
                 else:
-                    print('Found:           ' + str(temp))
+                    logger.info(f"Found TrueRNG device: {temp}")
                     rngcomports.append(str(temp[0]))
-        else:
-            if temp[1].startswith("TrueRNG"):
-                print('found device')
+            elif not HALO and temp[1].startswith("TrueRNG"):
+                logger.info(f"Found TrueRNG device: {temp}")
                 turbocom = str(temp[0])
-            
-    if HALO==True:
-        ser = []            
-        for a in range(0,len(rngcomports)):
-            ser.append(serial.Serial(port=rngcomports[a],timeout=10))    
-    if TurboUse==True:
-        turboser = (serial.Serial(port=turbocom,timeout=10)) 
-    
-    
-               
-    #print('Using com port:  ' + str(rng1_com_port))
-    #print('Using com port:  ' + str(rng2_com_port))
-    #print('==================================================')
-    sys.stdout.flush()
-    
-    if HALO==True:
-        for a in range(0,len(rngcomports)):
-            if ser[a].isOpen() == False:
-                ser[a].open()
-            
-            ser[a].setDTR(True)
-            ser[a].flushInput()
-    if TurboUse==True:
-        if turboser.isOpen()==False:
-            turboser.open()
-        turboser.setDTR(True)
-        turboser.flushInput()
+        
+        # Handle device initialization
+        if HALO:
+            if not rngcomports:
+                logger.warning("No regular TrueRNG devices found. Using PRNG fallback for regular streams.")
+                # Create dummy serial objects for PRNG
+                for _ in range(8):
+                    ser.append(None)
+            else:
+                for a in range(len(rngcomports)):
+                    try:
+                        new_ser = serial.Serial(port=rngcomports[a], timeout=10)
+                        ser.append(new_ser)
+                        logger.info(f"Initialized TrueRNG device: {rngcomports[a]}")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize TrueRNG device {rngcomports[a]}: {str(e)}")
+                        ser.append(None)
+                
+                # Fill any missing device slots with None
+                while len(ser) < 8:
+                    ser.append(None)
+                    
+        # Handle TurboRNG initialization
+        if TurboUse:
+            if not turbocom:
+                logger.warning("No TurboRNG Pro device found. Disabling TurboRNG feature.")
+                TurboUse = False
+            else:
+                try:
+                    turboser = serial.Serial(port=turbocom, timeout=10)
+                    logger.info(f"Initialized TurboRNG Pro device: {turbocom}")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize TurboRNG Pro device: {str(e)}")
+                    TurboUse = False
+                    turboser = None
+        
+        # Setup serial ports
+        for a in range(len(ser)):
+            if ser[a] is not None:
+                try:
+                    if not ser[a].isOpen():
+                        ser[a].open()
+                    ser[a].setDTR(True)
+                    ser[a].flushInput()
+                    logger.info(f"Opened and configured TrueRNG device: {rngcomports[a%len(rngcomports)]}")
+                except Exception as e:
+                    logger.warning(f"Error configuring TrueRNG device {a}: {str(e)}")
+                    ser[a] = None
+        
+        if TurboUse and turboser is not None:
+            try:
+                if not turboser.isOpen():
+                    turboser.open()
+                turboser.setDTR(True)
+                turboser.flushInput()
+                logger.info("Opened and configured TurboRNG Pro device")
+            except Exception as e:
+                logger.warning(f"Error configuring TurboRNG Pro device: {str(e)}")
+                TurboUse = False
+                turboser = None
         
         sys.stdout.flush()
+        
+    except Exception as e:
+        logger.error(f"Error initializing TrueRNG devices: {str(e)}")
+        logger.info("Falling back to PRNG mode")
+        RandomSrc = 'prng'
+        HALO = False
+        TurboUse = False
+        rngcomports = ['pseudoRNG']
+        ser = [None]
+        
+    # Verify we have enough working devices
+    working_devices = sum(1 for s in ser if s is not None)
+    if RandomSrc == 'trng' and working_devices == 0:
+        logger.warning("No working TrueRNG devices found. Switching to PRNG mode.")
+        RandomSrc = 'prng'
+        HALO = False
+        TurboUse = False
+        rngcomports = ['pseudoRNG']
+        ser = [None]
+        
 else:
+    # Not using hardware RNG
     rngcomports = ['pseudoRNG']
-    ser = ['pseudoRNG']
+    ser = [None]
 
 
 
@@ -695,76 +867,233 @@ def Color2Prompt (Cwords,Cweights,x_words):
 
 
 def Bulk():
-    
+    global UseConcurrentReading
+    global Bird  # Make Bird global so we can persist it between calls
     pct = []
-    allsums=[]
+    allsums = []
     
-
+    # Initialize Bird on first call
+    if not hasattr(Bulk, 'current_word'):
+        Bulk.current_word = Default_Word
     
-    for a in range (0,9):
+    # Initialize data arrays for all possible devices
+    for a in range(0, 9):
         pct.append([])
         
-    if TurboUse==True:
+    # Special handling for PRNG mode to ensure proper random data
+    if RandomSrc == 'prng' and not UseConcurrentReading:
+        # Fill arrays with proper random integers for PRNG mode
+        for a in range(0, NumNeds):
+            pct[a] = list(np.random.randint(0, 256, NEDspeed))
+        if TurboUse:
+            pct[8] = list(np.random.randint(0, 256, TurboSpeed))
     
-        if RandomSrc=='trng':
-            turboser.flushInput()
-            supernode = turboser.read(TurboSpeed)#CHG
-        if RandomSrc=='ipfs':
+    # Handle concurrent reading mode for hardware RNG    
+    if not hasattr(Bulk, 'rng_reader') and UseConcurrentReading and RandomSrc == 'trng':
+        try:
+            Bulk.rng_reader = RNGReader(num_devices=len(ser))
+            Bulk.rng_reader.start_readers(ser, NEDspeed)
+            logger.info("Started concurrent RNG reader")
+        except Exception as e:
+            logger.error(f"Failed to start concurrent reader: {str(e)}")
+            logger.info("Falling back to sequential reading")
+            UseConcurrentReading = False
+        
+    # Process data using concurrent reader
+    if UseConcurrentReading and RandomSrc == 'trng':
+        try:
+            # Get data from all devices using concurrent reader
+            device_data = Bulk.rng_reader.get_data()
+            
+            # Fallback to sequential if we don't have enough data
+            if len(device_data) < NumNeds:
+                logger.warning(f"Insufficient data from devices ({len(device_data)}/{NumNeds}), falling back to sequential")
+                Bulk.__dict__.pop('rng_reader', None)  # Remove reader to force reinitialization
+                UseConcurrentReading = False  # Temporarily disable concurrent reading
+                return Bulk()  # Retry with sequential reading
+                
+            # Process TurboRNG if enabled
+            if TurboUse:
+                try:
+                    logger.debug("Starting TurboRNG read", extra={'device_id': 'turbo'})
+                    turboser.flushInput()
+                    supernode = turboser.read(TurboSpeed)
+                    logger.debug(f"TurboRNG read complete - received {len(supernode)} bytes", extra={'device_id': 'turbo'})
+                except Exception as e:
+                    logger.error(f"TurboRNG read failed: {str(e)}", extra={'device_id': 'turbo'})
+                    logger.info("Using random data as fallback for TurboRNG")
+                    supernode = np.random.randint(0,256,TurboSpeed)
+                    
+                tempsum = 0
+                for b in range(0, len(supernode)):
+                    outfile.write('%d,'%(supernode[b]))
+                    pct[8].append(supernode[b])
+                    strnode = str(bin(256+int(supernode[b])))[3:]
+                    tempsum += sum(int(bit) for bit in strnode)
+                outfile.write('%d,T\n'%(int(time.time()*1000)))
+                allsums.append(tempsum)
+                
+            # Process data from regular RNG devices
+            for data in device_data:
+                device_idx = int(data.device_id[3:])  # Extract index from RNGx device_id
+                node = data.data
+                tempsum = 0
+                for mm in range(0, NEDspeed):
+                    outfile.write('%d,'%(node[mm]))
+                    pct[device_idx].append(node[mm])
+                    strnum = bin(256+node[mm])[3:]
+                    tempsum += sum(int(bit) for bit in strnum)
+                
+                allsums.append(tempsum)
+                outfile.write('%d,%s\n'%(int(time.time()*1000), rngcomports[device_idx%len(ser)]))
+                
+            # Ensure all device arrays are initialized with data
+            for i in range(NumNeds):
+                if not pct[i]:  # If array is empty
+                    pct[i] = [0] * NEDspeed  # Fill with zeros
+                    logger.warning(f"Missing data from device {i}, using zeros")
+        except Exception as e:
+            logger.error(f"Error in concurrent reading: {str(e)}")
+            logger.info("Falling back to sequential reading")
+            UseConcurrentReading = False
+            # Initialize with random data to ensure we can continue
+            for i in range(NumNeds):
+                if not pct[i]:  # If array is empty
+                    pct[i] = list(np.random.randint(0, 256, NEDspeed))
+                
+    # Sequential implementation (fallback for concurrent mode or default for non-concurrent mode)
+    if not UseConcurrentReading or RandomSrc != 'trng':
+        # Handle TurboRNG if enabled and using hardware
+        if TurboUse and RandomSrc == 'trng':
+            try:
+                logger.debug("Starting TurboRNG read", extra={'device_id': 'turbo'})
+                turboser.flushInput()
+                supernode = turboser.read(TurboSpeed)
+                logger.debug(f"TurboRNG read complete - received {len(supernode)} bytes", extra={'device_id': 'turbo'})
+            except Exception as e:
+                logger.error(f"TurboRNG read failed: {str(e)}", extra={'device_id': 'turbo'})
+                logger.info("Using random data as fallback for TurboRNG")
+                supernode = np.random.randint(0,256,TurboSpeed).tobytes()
+                
+            # Process TurboRNG data
+            tempsum = 0
+            for b in range(0, len(supernode)):
+                try:
+                    if isinstance(supernode[b], int):
+                        byte_val = supernode[b]
+                    else:
+                        byte_val = supernode[b] if isinstance(supernode[b], int) else ord(supernode[b])
+                except (IndexError, TypeError):
+                    byte_val = np.random.randint(0, 256)
+                    
+                outfile.write('%d,'%(byte_val))
+                pct[8].append(byte_val)
+                
+                strnode = str(bin(256+byte_val))[3:]
+                tempsum += sum(int(bit) for bit in strnode)
+            outfile.write('%d,T\n'%(int(time.time()*1000)))
+            
+            allsums.append(tempsum)
+            
+        # Handle IPFS data source
+        elif RandomSrc == 'ipfs':
             supernode = GrabIPFS()
-        if RandomSrc=='prng':
-            supernode = np.random.randint(0,256,TurboSpeed)
             
-        tempsum = 0
-        for b in range (0,len(supernode)):
-            outfile.write('%d,'%(supernode[b]))
-            pct[8].append(supernode[b])
+            # Process IPFS data
+            tempsum = 0
+            for b in range(0, len(supernode)):
+                outfile.write('%d,'%(supernode[b]))
+                pct[8].append(supernode[b])
+                
+                strnode = str(bin(256+int(supernode[b])))[3:]
+                tempsum += sum(int(bit) for bit in strnode)
+            outfile.write('%d,T\n'%(int(time.time()*1000)))
             
+            allsums.append(tempsum)
             
-            #allnodes.append(supernode[b])
-            strnode = str(bin(256+int(supernode[b])))[3:]
-            tempsum += (int(strnode[0])+int(strnode[1])+int(strnode[2])+int(strnode[3])+int(strnode[4])+int(strnode[5])+int(strnode[6])+int(strnode[7]))
-        outfile.write('%d,T\n'%(int(time.time()*1000)))
+        # Special handling for PRNG to use pre-populated arrays for Turbo
+        elif RandomSrc == 'prng' and TurboUse:
+            # Use the pre-populated data from pct[8]
+            tempsum = 0
+            for b in range(0, len(pct[8])):
+                outfile.write('%d,'%(pct[8][b]))
+                strnode = str(bin(256+pct[8][b]))[3:]
+                tempsum += sum(int(bit) for bit in strnode)
+            outfile.write('%d,T\n'%(int(time.time()*1000)))
+            
+            allsums.append(tempsum)
         
-        allsums.append(tempsum)
-        
-    for a in range(0,NumNeds):
-        if (HALO==True or TurboUse==False) and RandomSrc=='trng':
-            try:
-                ser[a%len(ser)].flushInput()
-                node = ser[a%len(ser)].read(NEDspeed)
-            except:
-                node = []
-        else:
-            if RandomSrc=='trng':
-                node = turboser.read(NEDspeed)
-            if RandomSrc=='prng':
-                node = np.random.randint(0,256,NEDspeed)
-            if RandomSrc=='ipfs':
+        # Process regular RNG device data - but skip for PRNG mode since we already populated the arrays
+        for a in range(0, NumNeds):
+            device_id = f"RNG{a}"
+            
+            # If using PRNG, we already filled the arrays, so just write to file
+            if RandomSrc == 'prng':
+                tempsum = 0
+                for mm in range(0, NEDspeed):
+                    outfile.write('%d,'%(pct[a][mm]))
+                    strnum = bin(256 + pct[a][mm])[3:]
+                    tempsum += sum(int(bit) for bit in strnum)
+                
+                allsums.append(tempsum)
+                outfile.write('%d,%s\n'%(int(time.time()*1000), "PRNG"))
+                continue
+            
+            # Read from hardware if using TRNG
+            if RandomSrc == 'trng':
+                try:
+                    # Only try to read from hardware if we have devices connected
+                    if len(ser) > 0:
+                        logger.debug(f"Starting read from device {rngcomports[a%len(ser)]}", extra={'device_id': device_id})
+                        ser[a%len(ser)].flushInput()
+                        node = ser[a%len(ser)].read(NEDspeed)
+                        logger.debug(f"Read complete - received {len(node)} bytes", extra={'device_id': device_id})
+                    else:
+                        # No devices connected, use random data
+                        raise Exception("No TrueRNG devices connected")
+                except Exception as e:
+                    logger.warning(f"Device read failed: {str(e)}. Using random data.", extra={'device_id': device_id})
+                    node = np.random.randint(0, 256, NEDspeed).tobytes()
+            # Use appropriate data source based on configuration
+            elif RandomSrc == 'ipfs':
                 node = GrabIPFS()
-        #print (a,len(node),TotalRuns)
-        while len(node)==0:
-            print('BAD READ ON %s ... removing'%rngcomports[a%len(ser)])
-            ser.remove(ser[a%len(ser)])
-            #bads[a] += 1
-            try:
-                ser[a%len(ser)].flushInput()
-                node = ser[a%len(ser)].read(NEDspeed)
-            except:
-                node = []
-       
-        tempsum = 0
-        for mm in range (0,NEDspeed):
-            outfile.write('%d,'%(node[mm]))
-            strnum = bin(256+node[mm])[3:]
-            pct[a].append(node[mm])
+            else:
+                # Fallback to PRNG for any unhandled case
+                node = np.random.randint(0, 256, NEDspeed).tobytes()
+           
+            # Process the data
+            tempsum = 0
+            for mm in range(0, NEDspeed):
+                try:
+                    val = node[mm]
+                    if isinstance(val, int):
+                        byte_val = val
+                    else:
+                        byte_val = val if isinstance(val, int) else ord(val)
+                except (IndexError, TypeError):
+                    # Handle case where node is shorter than expected or wrong type
+                    logger.warning(f"Data error at index {mm}, using random value", extra={'device_id': device_id})
+                    byte_val = np.random.randint(0, 256)
+                    
+                outfile.write('%d,'%(byte_val))
+                strnum = bin(256 + byte_val)[3:]
+                pct[a].append(byte_val)
+                
+                tempsum += sum(int(bit) for bit in strnum)
             
-            strnode = str(strnum)
-            tempsum += (int(strnode[0])+int(strnode[1])+int(strnode[2])+int(strnode[3])+int(strnode[4])+int(strnode[5])+int(strnode[6])+int(strnode[7]))
-        allsums.append(tempsum)
-        outfile.write('%d,%s\n'%(int(time.time()*1000),rngcomports[a%len(ser)]))
-        
-    x = []#CHG should be NEDspeed long
+            # Track entropy data
+            allsums.append(tempsum)
+            
+            # Write device identifier
+            if RandomSrc == 'trng' and len(ser) > 0:
+                outfile.write('%d,%s\n'%(int(time.time()*1000), rngcomports[a%len(ser)]))
+            else:
+                outfile.write('%d,%s\n'%(int(time.time()*1000), "PRNG" if RandomSrc == 'prng' else RandomSrc))
+
+    # Process the data for QByte
+    x = []  # This should be NEDspeed long
     
+    # Prepare data from all streams
     Pur0 = pct[0]
     Pur1 = pct[1]
     Pur2 = pct[2]
@@ -773,102 +1102,111 @@ def Bulk():
     Pur5 = pct[5]
     Pur6 = pct[6]
     Pur7 = pct[7]
-    if TurboUse==True:
+    if TurboUse:
         PurT = pct[8]
     
-    #This is where the magic occurs:
-    GenomeIdx = ((Pur0[0]*(256**2)) + (Pur0[1]*(256**1)) + (Pur0[2]*(256**0)))
+    # Generate genome index if needed
+    try:
+        GenomeIdx = ((Pur0[0]*(256**2)) + (Pur0[1]*(256**1)) + (Pur0[2]*(256**0)))
+    except (IndexError, TypeError):
+        # Handle case where data is missing
+        GenomeIdx = np.random.randint(0, 256**3)
+        logger.warning(f"Error calculating GenomeIdx, using random value: {GenomeIdx}")
 
-    for b in range (0,len(Pur0)):
-        
-        if SupHALO==True:
-            xA = Pur0[b]^Pur7[b]
-            xB = Pur1[b]^Pur6[b]
-            xC = Pur2[b]^Pur5[b]
-            xD = Pur3[b]^Pur4[b]
-        
-            xE = xA^xD
-            xF = xB^xC
-        else:
-        
-            xE = Pur0[b]^Pur3[b]
-            xF = Pur1[b]^Pur2[b]
-        
-        xG = xE^xF
-        
-        if TurboUse==True:
-            xH = xG^PurT[b]
-        else:
-            xH = xG
+    # Process each byte of data with the QByte algorithm
+    for b in range(0, len(Pur0)):
+        try:
+            if SupHALO:
+                xA = Pur0[b]^Pur7[b]
+                xB = Pur1[b]^Pur6[b]
+                xC = Pur2[b]^Pur5[b]
+                xD = Pur3[b]^Pur4[b]
+            
+                xE = xA^xD
+                xF = xB^xC
+            else:
+                xE = Pur0[b]^Pur3[b]
+                xF = Pur1[b]^Pur2[b]
+            
+            xG = xE^xF
+            
+            if TurboUse:
+                xH = xG^PurT[b]
+            else:
+                xH = xG
 
-        if Genome==True:
-            GenomeIdxX = (GenomeIdx+b)%len(GenomeBits)
-            xDNA = xH ^ GenomeBits[GenomeIdxX]
-        else:
-            xDNA = xH
-        
-        x.append(xDNA)
-
-        
-        
-        
-        
-
-
+            if Genome:
+                GenomeIdxX = (GenomeIdx+b)%len(GenomeBits)
+                xDNA = xH ^ GenomeBits[GenomeIdxX]
+            else:
+                xDNA = xH
+            
+            x.append(xDNA)
+        except (IndexError, TypeError) as e:
+            # Handle error in data processing
+            logger.warning(f"Error processing byte {b}: {str(e)}")
+            x.append(np.random.randint(0, 256))  # Use random data for this byte
     
-
-    
-    #OG:
-    #ser.flushInput()
-    #x = ser.read(NEDspeed)
-    
+    # Calculate bit count
     bitct = 0
-    for a in range (0,len(x)):
-        outfile.write('%d,' % x[a])
-        strnode = str(bin(256 + int(x[a])))[3:]
-        bitct += (int(strnode[0]) + int(strnode[1]) + int(strnode[2]) + 
-                 int(strnode[3]) + int(strnode[4]) + int(strnode[5]) + 
-                 int(strnode[6]) + int(strnode[7]))
-        
+    for a in range(0, len(x)):
+        try:
+            outfile.write('%d,' % x[a])
+            strnode = str(bin(256 + int(x[a])))[3:]
+            bitct += sum(int(bit) for bit in strnode)
+        except (ValueError, TypeError) as e:
+            # Handle error in bit counting
+            logger.warning(f"Error counting bits for byte {a}: {str(e)}")
+            outfile.write('0,')  # Write a placeholder
+    
     outfile.write('%d,QBYTE | ' % (int(time.time()*1000)))
     
-    
-    
+    # Flush the data to disk
     outfile.flush()
     os.fsync(outfile.fileno())
     
-    
-    str0 = str(bin(256+int(x[-2])))[3:] + str(bin(256+int(x[-1])))[3:]
-    ones = int(str0[0])+int(str0[1])+int(str0[2])+int(str0[3])+int(str0[4])+int(str0[5])+int(str0[6])+int(str0[7])+int(str0[8])+int(str0[9])+int(str0[10])+int(str0[11])+int(str0[12])+int(str0[13])+int(str0[14])+int(str0[15])
+    # Process final bytes for word selection
+    try:
+        str0 = str(bin(256+int(x[-2])))[3:] + str(bin(256+int(x[-1])))[3:]
+        ones = sum(int(bit) for bit in str0)
 
-    #cat = np.random.randint(0,3)
-    
-    uidx = -3
-    sector = -9999
-    while sector < -1:
-        if x[uidx] < 252:
-            sector = x[uidx]%3
-        uidx -= 1
-    
-    
-    
-    LO_idx = ((sector%3)*65536)+(x[-2]*256)+x[-1]
-    wrd = AllLO[LO_idx]
-
-    Z = np.abs(ones-8)
-
-    if ones==8:
-        symbol = '.0'
-    if ones<8:
-        symbol = '.-%d'%Z
-    if ones>8:
-        symbol = '.+%d'%Z
-
-    outfile.write('%s\n'%wrd)
+        uidx = -3
+        sector = -9999
+        while sector < -1:
+            if x[uidx] < 252:
+                sector = x[uidx]%3
+            uidx -= 1
         
-    #print(len(x))
+        LO_idx = ((sector%3)*65536)+(x[-2]*256)+x[-1]
+        
+        # Only update the word if we're in a coherence event
+        if np.abs(bitct-EX) > ColorThres:
+            try:
+                Bulk.current_word = AllLO[LO_idx]
+            except IndexError:
+                # Handle case where LO_idx is out of range
+                logger.warning(f"Invalid word index {LO_idx}, using default word")
+                Bulk.current_word = Default_Word
+        
+        wrd = Bulk.current_word
+
+        Z = np.abs(ones-8)
+
+        if ones==8:
+            symbol = '.0'
+        if ones<8:
+            symbol = '.-%d'%Z
+        if ones>8:
+            symbol = '.+%d'%Z
+    except (IndexError, ValueError, TypeError) as e:
+        # Handle errors in word selection logic
+        logger.warning(f"Error in word selection: {str(e)}")
+        wrd = Default_Word
+        symbol = '.0'
     
-    return x,bitct,symbol,wrd,allsums
+    outfile.write('%s\n'%wrd)
+    
+    return x, bitct, symbol, wrd, allsums
 
 maxon = 65535
 def GetColors(colors,typidx):
@@ -1284,12 +1622,14 @@ def animate(i):
     Rplt.append(R - (Pmod_Rot*NtR))
     Rstd.append(((NtR*Pmod_Rot*(1-Pmod_Rot))**0.5)*1.65)
             
+            
     plt.suptitle('%02d:%02d:%02d.%s%s UTC      |      T+ %02d:%02d:%02d'%(hrOfD,mnOfD,scOfD,microf,t_symbol,hrRun,mnRun,scRun),color=[np.average(reds),np.average(greens),np.average(blues)],size=wordsize)
     if Type == 'AEM':
         ax1.text(0,0,0,"%s"%(Bird),ha='center',va='center',color=[np.average(reds),np.average(greens),np.average(blues)],size=wordsize)
     if Type == 'quad':
         ax1.text(3,3,0,"%s"%(Bird),ha='center',va='center',color=[np.average(reds),np.average(greens),np.average(blues)],size=wordsize)
       
+        
         
         
     ax1.grid(False)
@@ -1347,6 +1687,7 @@ def animate(i):
 
     else:
                 
+        
         
         if TurboUse==True:
             ax2.plot(ult_t[-60:],np.array(ax1y[0][-60:])-ax1y[0][-60],color='red',linewidth='1',label='Turbo')
